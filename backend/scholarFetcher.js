@@ -15,7 +15,7 @@ logger.configure({
 });
 
 class ScholarFetcher {
-  constructor() {
+  constructor(config = {}) {
     // Base URL for Google Scholar
     this.baseUrl = 'https://scholar.google.com';
     
@@ -27,55 +27,80 @@ class ScholarFetcher {
       'Accept-Encoding': 'gzip, deflate, br',
       'Connection': 'keep-alive',
     };
+
+    // Add timeout and rate limiting
+    this.timeout = config.timeout || 10000;
+    this.delayBetweenRequests = config.delayBetweenRequests || 2000;
+    this.maxRetries = config.maxRetries || 3;
+  }
+
+  validateInput(query, count) {
+    if (!query || typeof query !== 'string') {
+      throw new Error('Invalid query parameter');
+    }
+    if (!count || typeof count !== 'number' || count < 1) {
+      throw new Error('Invalid count parameter');
+    }
   }
 
   async fetchArticles(query, count = 10) {
-    console.log("get into fetch article");
     try {
+      this.validateInput(query, count);
+      logger.info(`Fetching ${count} articles for query: ${query}`);
+      
       const articles = [];
-      const pageSize = 10; // Google Scholar shows 10 results per page
+      const pageSize = 10;
       const numPages = Math.ceil(count / pageSize);
+      let retries = 0;
 
       for (let page = 0; page < numPages; page++) {
-        const start = page * pageSize;
-        const url = `${this.baseUrl}/scholar`;
-        
-        const response = await axios.get(url, {
-          headers: this.headers,
-          params: {
-            q: query,
-            start: start,
-            hl: 'en',
-            as_sdt: '0,5'
+        try {
+          const response = await axios.get(`${this.baseUrl}/scholar`, {
+            headers: this.headers,
+            params: {
+              q: query,
+              start: page * pageSize,
+              hl: 'en',
+              as_sdt: '0,5'
+            },
+            timeout: this.timeout
+          });
+
+          const $ = cheerio.load(response.data);
+          const articleElements = $('.gs_r.gs_scl');
+
+          articleElements.each((idx, element) => {
+            if (articles.length >= count) return false;
+
+            const $element = $(element);
+            const articleData = this.parseArticleElement($, $element);
+            
+            if (articleData) {
+              articles.push(articleData);
+            }
+          });
+
+          if (articles.length >= count) break;
+
+          await new Promise(resolve => setTimeout(resolve, this.delayBetweenRequests));
+        } catch (error) {
+          if (retries < this.maxRetries) {
+            retries++;
+            logger.warn(`Retry ${retries}/${this.maxRetries} for page ${page}`);
+            page--; // Retry current page
+            await new Promise(resolve => setTimeout(resolve, this.delayBetweenRequests * 2));
+            continue;
           }
-        });
-
-        const $ = cheerio.load(response.data);
-        const articleElements = $('.gs_r.gs_scl');
-
-        articleElements.each((idx, element) => {
-          if (articles.length >= count) return false;
-
-          const $element = $(element);
-          const articleData = this.parseArticleElement($, $element);
-          
-          if (articleData) {
-            articles.push(articleData);
-          }
-        });
-
-        if (articles.length >= count) break;
-
-        // Add delay between requests to avoid being blocked
-        await new Promise(resolve => setTimeout(resolve, 2000));
+          throw error;
+        }
       }
 
       logger.info(`Successfully fetched ${articles.length} articles`);
       return articles.slice(0, count);
 
     } catch (error) {
-      logger.error(`Error fetching articles: ${error.message}`);
-      throw error;
+      logger.error(`Scholar fetch failed: ${error.message}`);
+      throw new Error(`Failed to fetch articles: ${error.message}`);
     }
   }
 
@@ -129,29 +154,4 @@ class ScholarFetcher {
   }
 }
 
-module.exports = ScholarFetcher;
-
-// Example usage
-async function example() {
-  try {
-    const scholarFetcher = new ScholarFetcher();
-    const articles = await scholarFetcher.fetchArticles('artificial intelligence', 5);
-    
-    console.log('\nFetched Articles:');
-    articles.forEach((article, index) => {
-      console.log(`\nArticle ${index + 1}:`);
-      console.log('Title:', article.title);
-      console.log('Authors:', article.authors);
-      console.log('Year:', article.year);
-      console.log('Abstract:', article.abstract);
-      console.log('URL:', article.url);
-      console.log('Publication:', article.publication);
-    });
-
-  } catch (error) {
-    console.error('Error in example:', error.message);
-  }
-}
-
-// Uncomment to run the example
-// example();
+module.exports = { ScholarFetcher };

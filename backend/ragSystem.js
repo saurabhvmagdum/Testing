@@ -2,20 +2,23 @@ require("dotenv").config();
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const logger = require("winston");
 
-// Configure winston logger
+// Improved logger configuration
 logger.configure({
   transports: [
     new logger.transports.Console({
       format: logger.format.combine(
+        logger.format.timestamp(),
         logger.format.colorize(),
-        logger.format.simple()
+        logger.format.printf(({ timestamp, level, message }) => {
+          return `${timestamp} [${level}]: ${message}`;
+        })
       )
     })
   ]
 });
 
 class RAGSystem {
-  constructor(apiKey) {
+  constructor(apiKey, config = {}) {
     // If apiKey is not provided, get it from environment variables
     if (!apiKey && !process.env.GEMINI_API_KEY) {
       throw new Error("API key is required to initialize RAGSystem.");
@@ -31,10 +34,10 @@ class RAGSystem {
       this.model = this.genAI.getGenerativeModel({
         model: "gemini-pro",
         generationConfig: {
-          temperature: 0.7,
-          topP: 0.95,
-          topK: 50,
-          maxOutputTokens: 150,
+          temperature: config.temperature || 0.7,
+          topP: config.topP || 0.95,
+          topK: config.topK || 50,
+          maxOutputTokens: config.maxOutputTokens || 150,
         }
       });
 
@@ -43,32 +46,68 @@ class RAGSystem {
       logger.error(`Error initializing the Gemini model: ${error.message}`);
       throw error;
     }
+
+    this.timeout = config.timeout || 30000;
+    this.maxRetries = config.maxRetries || 2;
+
+    this.promptTemplates = {
+      summarize: (query, context) => `
+        Summarize the latest research on ${query}.
+        Focus on key findings and conclusions.
+        Use only the provided context:
+        ${context}
+      `,
+      // Add more templates as needed
+    };
   }
 
-  async generateResponse(prompt) {
+  validateResponse(text) {
+    if (!text || typeof text !== 'string' || text.length < 10) {
+      throw new Error('Invalid response from model');
+    }
+    return text.trim();
+  }
+
+  async withTimeout(promise) {
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Request timed out')), this.timeout);
+    });
+    return Promise.race([promise, timeoutPromise]);
+  }
+
+  sanitizePrompt(prompt) {
+    if (!prompt || typeof prompt !== 'string') {
+      throw new Error('Invalid prompt provided');
+    }
+    return prompt.trim().replace(/[^\w\s.,?!-]/g, '');
+  }
+
+  async generateResponse(prompt, options = {}) {
     /**
      * Generates a response for the given prompt using the Gemini API.
      * @param {string} prompt - The input prompt for generating content.
      * @returns {string} The generated response text.
      */
-    try {
-      if (!prompt || typeof prompt !== 'string') {
-        throw new Error('Invalid prompt provided');
+    let attempts = 0;
+    while (attempts < this.maxRetries) {
+      try {
+        const sanitizedPrompt = this.sanitizePrompt(prompt);
+        logger.info(`Generating response for prompt: ${sanitizedPrompt.substring(0, 50)}...`);
+
+        // Generate content
+        const result = await this.withTimeout(
+          this.model.generateContent(sanitizedPrompt)
+        );
+        const text = result.response.text();
+        return this.validateResponse(text);
+      } catch (error) {
+        attempts++;
+        if (attempts === this.maxRetries) {
+          logger.error(`Error in generateResponse: ${error.message}`);
+          throw error;
+        }
+        await new Promise(resolve => setTimeout(resolve, 1000 * attempts));
       }
-
-      // Generate content
-      const result = await this.model.generateContent(prompt);
-      const response = await result.response;
-      const text = response.text();
-
-      if (!text) {
-        throw new Error('No response text received from the Gemini model');
-      }
-
-      return text.trim();
-    } catch (error) {
-      logger.error(`Error generating response: ${error.message}`);
-      throw error;
     }
   }
 
@@ -79,16 +118,20 @@ class RAGSystem {
      * @returns {AsyncGenerator} A generator that yields response chunks.
      */
     try {
-      if (!prompt || typeof prompt !== 'string') {
-        throw new Error('Invalid prompt provided');
-      }
+      const sanitizedPrompt = this.sanitizePrompt(prompt);
+      logger.info(`Generating stream response for prompt: ${sanitizedPrompt.substring(0, 50)}...`);
 
       // Generate streaming content
-      const result = await this.model.generateContentStream(prompt);
+      const result = await this.model.generateContentStream(sanitizedPrompt);
       
+      // Add error handling for stream
+      if (!result) {
+        throw new Error('Failed to generate stream response');
+      }
+
       return result;
     } catch (error) {
-      logger.error(`Error generating streaming response: ${error.message}`);
+      logger.error(`Error in generateStreamResponse: ${error.message}`);
       throw error;
     }
   }
@@ -121,45 +164,3 @@ class RAGSystem {
 }
 
 module.exports = { RAGSystem };
-
-// Example Usage
-async function example() {
-  try {
-    const ragSystem = new RAGSystem(); // Will use GEMINI_API_KEY from .env
-    
-    // Simple response
-    console.log("\nGenerating simple response:");
-    const response1 = await ragSystem.generateResponse(
-      "What are the benefits of artificial intelligence?"
-    );
-    console.log(response1);
-
-    // Streaming response
-    console.log("\nGenerating streaming response:");
-    const stream = await ragSystem.generateStreamResponse(
-      "List 5 interesting facts about space exploration."
-    );
-    for await (const chunk of stream) {
-      const chunkText = chunk.text();
-      console.log(chunkText);
-    }
-
-    // Structured response
-    console.log("\nGenerating structured response:");
-    const structuredResponse = await ragSystem.generateStructuredResponse(
-      "What are the pros and cons of remote work?",
-      {
-        pros: "List of advantages",
-        cons: "List of disadvantages",
-        conclusion: "Summary statement"
-      }
-    );
-    console.log(structuredResponse);
-
-  } catch (error) {
-    console.error("Error in example:", error.message);
-  }
-}
-
-// Uncomment to run the example
-// example();

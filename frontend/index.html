@@ -3,24 +3,85 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Research Assistant</title>
+  <title>Scholar Search</title>
   <link rel="stylesheet" href="style.css">
+  <style>
+    .loader { display: none; }
+    .error-message { 
+      display: none;
+      color: red;
+      margin: 10px 0;
+    }
+    .article-card {
+      margin: 20px 0;
+      padding: 15px;
+      border: 1px solid #ddd;
+      border-radius: 5px;
+    }
+    .summary {
+      margin-top: 10px;
+      padding: 10px;
+      background-color: #f5f5f5;
+    }
+    .system-status {
+      padding: 10px;
+      margin-bottom: 20px;
+      border-radius: 4px;
+    }
+    .status-ok { background-color: #dff0d8; }
+    .status-error { background-color: #f2dede; }
+  </style>
 </head>
 <body>
   <div class="container">
-    <h1>AI Research Assistant</h1>
+    <h1>Scholar Search</h1>
     
-    <!-- Google Scholar Search -->
-    <div>
-      <input type="text" id="scholar-query" placeholder="Enter research topic">
-      <button onclick="fetchScholarArticles()">Fetch Google Scholar Articles</button>
-    </div>
-    
-    <!-- Display Articles -->
+    <div id="system-status" class="system-status"></div>
+
+    <form id="search-form">
+      <input type="text" id="scholar-query" placeholder="Enter search query...">
+      <button type="submit" id="fetch-button">Search</button>
+    </form>
+
+    <div id="loader" class="loader">Loading...</div>
+    <div id="error-message" class="error-message"></div>
     <div id="scholar-articles"></div>
     
   </div>
 
-  <script src="app.js"></script>
+  <script>
+    // Add system status check
+    async function checkSystemStatus() {
+      try {
+        const response = await fetch('http://localhost:5000/health');
+        const data = await response.json();
+        const statusDiv = document.getElementById('system-status');
+        
+        if (data.status === 'ok' && data.vectorDb === 'ready') {
+          statusDiv.className = 'system-status status-ok';
+          statusDiv.textContent = 'System ready';
+          document.getElementById('fetch-button').disabled = false;
+        } else {
+          statusDiv.className = 'system-status status-error';
+          statusDiv.textContent = 'System initializing...';
+          document.getElementById('fetch-button').disabled = true;
+        }
+      } catch (error) {
+        console.error('Health check failed:', error);
+      }
+    }
+
+    // Check status on load and every 5 seconds until ready
+    checkSystemStatus();
+    const statusInterval = setInterval(() => {
+      if (document.getElementById('system-status').classList.contains('status-ok')) {
+        clearInterval(statusInterval);
+      } else {
+        checkSystemStatus();
+      }
+    }, 5000);
+  </script>
+  <!-- Make sure the path is correct -->
+  <script src="./app.js"></script>
 </body>
 </html>

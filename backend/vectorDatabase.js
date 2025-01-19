@@ -1,6 +1,6 @@
 require("dotenv").config();
-const { PineconeClient } = require("@pinecone-database/pinecone"); // Pinecone SDK for Node.js
-const { HfInference } = require("@huggingface/inference"); // Hugging Face library for embeddings
+const { Pinecone } = require("@pinecone-database/pinecone");
+const { HfInference } = require("@huggingface/inference");
 
 class VectorDatabase {
   constructor(apiKey, pineconeApiKey, pineconeEnvironment) {
@@ -8,111 +8,146 @@ class VectorDatabase {
       throw new Error("API keys and environment are required to initialize VectorDatabase.");
     }
 
-    // Initialize Hugging Face Inference for embeddings
+    // Initialize Hugging Face client
     this.embeddingClient = new HfInference(apiKey);
 
-    // Initialize Pinecone client
+    // Initialize Pinecone properties
     this.pineconeClient = null;
     this.pineconeApiKey = pineconeApiKey;
     this.pineconeEnvironment = pineconeEnvironment;
-    this.collectionName = "documents"; // Use this as the Pinecone namespace
+    this.collectionName = "research-articles"; // Changed from "researchguy"
+    this.batchSize = 100;
+    this.index = null;
+    
+    // Get host URL from environment
+    const pineconeHost = process.env.PINECONE_HOST;
+    if (!pineconeHost) {
+      throw new Error("Pinecone host URL is required");
+    }
+    this.controllerHostUrl = pineconeHost;
   }
 
   async initialize() {
     try {
-      // Create a new Pinecone client
-      this.pineconeClient = await PineconeClient.init({
+      this.pineconeClient = new Pinecone({
         apiKey: this.pineconeApiKey,
-        environment: this.pineconeEnvironment,
+        controllerHostUrl: this.controllerHostUrl
       });
-      console.log("Pinecone client initialized successfully");
+
+      // Check if index exists
+      const indexes = await this.pineconeClient.listIndexes();
+      console.log('Available indexes:', indexes);
+
+      if (!indexes.includes(this.collectionName)) {
+        console.log(`Index ${this.collectionName} not found. Creating new index...`);
+        await this.createCollection();
+        // Wait for index to be ready
+        await this.waitForIndex();
+      }
+
+      // Get index after ensuring it exists
+      this.index = this.pineconeClient.index('research-articles');
+      
+      // Verify connection
+      const indexDescription = await this.pineconeClient.describeIndex(this.collectionName);
+      console.log("Pinecone Connection Successful. Index Description:", {
+        name: indexDescription.name,
+        dimension: indexDescription.dimension,
+        metric: indexDescription.metric,
+        status: indexDescription.status
+      });
+      
+      return true;
     } catch (error) {
-      console.error("Error initializing Pinecone client:", error.message);
+      console.error("Error initializing Pinecone client:", error);
       throw error;
     }
   }
 
+  async waitForIndex(maxAttempts = 10) {
+    for (let i = 0; i < maxAttempts; i++) {
+      try {
+        const indexDescription = await this.pineconeClient.describeIndex(this.collectionName);
+        if (indexDescription.status?.ready) {
+          console.log('Index is ready');
+          return true;
+        }
+        console.log('Waiting for index to be ready...');
+        await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
+      } catch (error) {
+        console.log('Error checking index status:', error);
+        await new Promise(resolve => setTimeout(resolve, 5000));
+      }
+    }
+    throw new Error('Index failed to become ready in time');
+  }
+
   async createCollection() {
     try {
-      if (!this.pineconeClient) {
-        throw new Error("Pinecone client not initialized. Call initialize() first.");
-      }
-      // Create a new index in Pinecone (namespace)
-      const index = await this.pineconeClient.createIndex({
+      await this.pineconeClient.createIndex({
         name: this.collectionName,
-        dimension: 768, // Embedding size for the model you are using (e.g., MiniLM)
-        metric: "cosine", // Use cosine similarity
+        dimension: 1024,
+        metric: "cosine",
       });
-      console.log(`Pinecone collection "${this.collectionName}" created.`);
+      console.log(`Pinecone index "${this.collectionName}" creation initiated.`);
     } catch (error) {
-      console.error("Error creating Pinecone collection:", error.message);
+      console.error("Error creating Pinecone index:", error.message);
       throw error;
     }
   }
 
   async addDocuments(documents) {
     try {
-      if (!this.pineconeClient) {
-        throw new Error("Pinecone client not initialized. Call initialize() first.");
+      if (!this.index) {
+        throw new Error("Pinecone index not initialized");
       }
 
-      // Generate embeddings for all documents
-      const embeddings = await Promise.all(
-        documents.map(async (text) => ({
-          embedding: await this.generateEmbedding(text),
-          text,
-        }))
-      );
+      if (!Array.isArray(documents)) {
+        throw new Error('Documents must be an array');
+      }
 
-      // Prepare Pinecone upsert data
-      const upsertData = embeddings.map(({ embedding, text }, idx) => ({
-        id: idx.toString(), // Use string IDs for Pinecone
-        values: embedding, // The vector
-        metadata: { text }, // Optional metadata (e.g., original document text)
-      }));
+      // Process in batches
+      for (let i = 0; i < documents.length; i += this.batchSize) {
+        const batch = documents.slice(i, i + this.batchSize);
+        const embeddings = await Promise.all(
+          batch.map(text => this.generateEmbedding(text))
+        );
+        
+        const upsertData = embeddings.map((embedding, idx) => ({
+          id: `${Date.now()}-${i + idx}`,
+          values: embedding,
+          metadata: { text: batch[idx] },
+        }));
 
-      // Get the index instance
-      const index = this.pineconeClient.Index(this.collectionName);
+        // Updated upsert syntax
+        await this.index.upsert({
+          vectors: upsertData
+        });
+      }
 
-      // Upsert data to Pinecone
-      await index.upsert({
-        upsertRequest: {
-          vectors: upsertData,
-          namespace: this.collectionName,
-        }
-      });
-
-      console.log(`Added ${documents.length} documents to Pinecone.`);
+      return true;
     } catch (error) {
-      console.error("Error adding documents to Pinecone:", error.message);
+      console.error("Error in batch processing:", error);
       throw error;
     }
   }
 
   async similaritySearch(query, k = 5) {
     try {
-      if (!this.pineconeClient) {
-        throw new Error("Pinecone client not initialized. Call initialize() first.");
+      if (!this.index) {
+        throw new Error("Pinecone index not initialized");
       }
 
-      // Generate embedding for the query
       const queryEmbedding = await this.generateEmbedding(query);
 
-      // Get the index instance
-      const index = this.pineconeClient.Index(this.collectionName);
-
-      // Perform similarity search
-      const queryResult = await index.query({
-        queryRequest: {
-          vector: queryEmbedding,
-          topK: k,
-          includeMetadata: true,
-          namespace: this.collectionName,
-        }
+      // Updated query syntax
+      const queryResponse = await this.index.query({
+        vector: queryEmbedding,
+        topK: k,
+        includeMetadata: true
       });
 
-      // Map results to an array
-      return queryResult.matches.map((match) => ({
+      return queryResponse.matches.map((match) => ({
         document: match.metadata.text,
         score: match.score,
       }));
