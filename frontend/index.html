@@ -3,10 +3,22 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Scholar Search</title>
+  <title>Search App</title>
   <link rel="stylesheet" href="style.css">
   <style>
-    .loader { display: none; }
+    .loader {
+      display: none;
+      border: 16px solid #f3f3f3;
+      border-radius: 50%;
+      border-top: 16px solid #3498db;
+      width: 120px;
+      height: 120px;
+      animation: spin 2s linear infinite;
+    }
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
     .error-message { 
       display: none;
       color: red;
@@ -37,23 +49,26 @@
     <h1>Scholar Search</h1>
     
     <div id="system-status" class="system-status"></div>
+    <div id="statusDiv" class="system-status"></div>
 
     <form id="search-form">
       <input type="text" id="scholar-query" placeholder="Enter search query...">
       <button type="submit" id="fetch-button">Search</button>
     </form>
 
-    <div id="loader" class="loader">Loading...</div>
+    <div id="loader" class="loader"></div>
     <div id="error-message" class="error-message"></div>
     <div id="scholar-articles"></div>
     
   </div>
 
   <script>
-    // Add system status check
     async function checkSystemStatus() {
       try {
         const response = await fetch('http://localhost:5000/health');
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
         const data = await response.json();
         const statusDiv = document.getElementById('system-status');
         
@@ -68,18 +83,22 @@
         }
       } catch (error) {
         console.error('Health check failed:', error);
+        showError('Failed to fetch system status. Please try again later.');
       }
     }
 
-    // Check status on load and every 5 seconds until ready
-    checkSystemStatus();
-    const statusInterval = setInterval(() => {
-      if (document.getElementById('system-status').classList.contains('status-ok')) {
-        clearInterval(statusInterval);
-      } else {
-        checkSystemStatus();
+    function showError(message) {
+      const errorDiv = document.getElementById('error-message');
+      if (errorDiv) {
+        errorDiv.textContent = message;
+        errorDiv.style.display = 'block';
+        setTimeout(() => errorDiv.style.display = 'none', 5000);
       }
-    }, 5000);
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      checkSystemStatus();
+    });
   </script>
   <!-- Make sure the path is correct -->
   <script src="./app.js"></script>

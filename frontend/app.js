@@ -20,41 +20,48 @@ function showError(message) {
   }
 }
 
-async function fetchScholarArticles() {
-  const query = document.getElementById("scholar-query").value;
-  
-  if (!query) {
-    showError('Please enter a search query');
-    return;
-  }
-
-  setLoading(true);
-  
+async function checkSystemStatus() {
   try {
-    const response = await fetch(`${API_BASE_URL}/fetch-scholar-articles`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ query, count: 5 })
-    });
-
+    const response = await fetch(`${API_BASE_URL}/health`);
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
-
     const data = await response.json();
-    if (data.articles) {
-      displayArticles(data.articles);
-      if (data.abstractsAdded > 0) {
-        showError(`Added ${data.abstractsAdded} abstracts to the database`);
-      }
+    const statusDiv = document.getElementById('system-status');
+    
+    if (data.status === 'ok' && data.vectorDb === 'ready') {
+      statusDiv.className = 'system-status status-ok';
+      statusDiv.textContent = 'System ready';
+      document.getElementById('fetch-button').disabled = false;
     } else {
-      showError('No articles found');
+      statusDiv.className = 'system-status status-error';
+      statusDiv.textContent = 'System initializing...';
+      document.getElementById('fetch-button').disabled = true;
     }
   } catch (error) {
-    console.error('Error:', error);
-    showError('Error fetching articles: ' + error.message);
+    console.error('Health check failed:', error);
+    showError('Failed to fetch system status. Please try again later.');
+  }
+}
+
+async function fetchScholarArticles() {
+  const query = 'example query'; // Replace with actual query input
+  setLoading(true);
+  try {
+    const response = await fetch(`${API_BASE_URL}/search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query })
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    const data = await response.json();
+    const articlesDiv = document.getElementById('articles');
+    articlesDiv.innerHTML = data.results.map(result => `<div>${result}</div>`).join('');
+  } catch (error) {
+    console.error('Error fetching scholar articles:', error);
+    showError('Failed to fetch articles. Please try again later.');
   } finally {
     setLoading(false);
   }
@@ -132,12 +139,5 @@ async function summarizeArticle(title) {
 
 // Event listeners
 document.addEventListener('DOMContentLoaded', () => {
-  const searchForm = document.getElementById('search-form');
-  if (searchForm) {
-    searchForm.addEventListener('submit', (e) => {
-      e.preventDefault();
-      fetchScholarArticles();
-    });
-  }
+  checkSystemStatus();
 });
-

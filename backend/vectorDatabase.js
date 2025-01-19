@@ -1,107 +1,66 @@
 require("dotenv").config();
-const { Pinecone } = require("@pinecone-database/pinecone");
+const { QdrantClient } = require("@qdrant/js-client-rest");
 const { HfInference } = require("@huggingface/inference");
 
 class VectorDatabase {
-  constructor(apiKey, pineconeApiKey, pineconeEnvironment) {
-    if (!apiKey || !pineconeApiKey || !pineconeEnvironment) {
-      throw new Error("API keys and environment are required to initialize VectorDatabase.");
+  constructor(apiKey, qdrantUrl, qdrantApiKey) {
+    if (!apiKey || !qdrantUrl) {
+      throw new Error("API keys and Qdrant URL are required.");
     }
 
     // Initialize Hugging Face client
     this.embeddingClient = new HfInference(apiKey);
 
-    // Initialize Pinecone properties
-    this.pineconeClient = null;
-    this.pineconeApiKey = pineconeApiKey;
-    this.pineconeEnvironment = pineconeEnvironment;
-    this.collectionName = "research-articles"; // Changed from "researchguy"
+    // Initialize Qdrant client
+    this.qdrantClient = new QdrantClient({ 
+      url: qdrantUrl,
+      apiKey: qdrantApiKey
+    });
+
+    this.collectionName = "research-articles";
+    this.vectorSize = 1024;
     this.batchSize = 100;
-    this.index = null;
-    
-    // Get host URL from environment
-    const pineconeHost = process.env.PINECONE_HOST;
-    if (!pineconeHost) {
-      throw new Error("Pinecone host URL is required");
-    }
-    this.controllerHostUrl = pineconeHost;
   }
 
   async initialize() {
     try {
-      this.pineconeClient = new Pinecone({
-        apiKey: this.pineconeApiKey,
-        controllerHostUrl: this.controllerHostUrl
-      });
+      // Check if collection exists
+      const collections = await this.qdrantClient.getCollections();
+      const exists = collections.collections.some(c => c.name === this.collectionName);
 
-      // Check if index exists
-      const indexes = await this.pineconeClient.listIndexes();
-      console.log('Available indexes:', indexes);
-
-      if (!indexes.includes(this.collectionName)) {
-        console.log(`Index ${this.collectionName} not found. Creating new index...`);
+      if (!exists) {
+        console.log(`Collection ${this.collectionName} not found. Creating new collection...`);
         await this.createCollection();
-        // Wait for index to be ready
-        await this.waitForIndex();
       }
 
-      // Get index after ensuring it exists
-      this.index = this.pineconeClient.index('research-articles');
-      
-      // Verify connection
-      const indexDescription = await this.pineconeClient.describeIndex(this.collectionName);
-      console.log("Pinecone Connection Successful. Index Description:", {
-        name: indexDescription.name,
-        dimension: indexDescription.dimension,
-        metric: indexDescription.metric,
-        status: indexDescription.status
-      });
+      // Verify collection is ready
+      const collectionInfo = await this.qdrantClient.getCollection(this.collectionName);
+      console.log("Qdrant Connection Successful. Collection Info:", collectionInfo);
       
       return true;
     } catch (error) {
-      console.error("Error initializing Pinecone client:", error);
+      console.error("Error initializing Qdrant client:", error);
       throw error;
     }
   }
 
-  async waitForIndex(maxAttempts = 10) {
-    for (let i = 0; i < maxAttempts; i++) {
-      try {
-        const indexDescription = await this.pineconeClient.describeIndex(this.collectionName);
-        if (indexDescription.status?.ready) {
-          console.log('Index is ready');
-          return true;
-        }
-        console.log('Waiting for index to be ready...');
-        await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds
-      } catch (error) {
-        console.log('Error checking index status:', error);
-        await new Promise(resolve => setTimeout(resolve, 5000));
-      }
-    }
-    throw new Error('Index failed to become ready in time');
-  }
-
   async createCollection() {
     try {
-      await this.pineconeClient.createIndex({
-        name: this.collectionName,
-        dimension: 1024,
-        metric: "cosine",
+      await this.qdrantClient.createCollection(this.collectionName, {
+        vectors: {
+          size: this.vectorSize,
+          distance: "Cosine"
+        }
       });
-      console.log(`Pinecone index "${this.collectionName}" creation initiated.`);
+      console.log(`Qdrant collection "${this.collectionName}" created.`);
     } catch (error) {
-      console.error("Error creating Pinecone index:", error.message);
+      console.error("Error creating Qdrant collection:", error);
       throw error;
     }
   }
 
   async addDocuments(documents) {
     try {
-      if (!this.index) {
-        throw new Error("Pinecone index not initialized");
-      }
-
       if (!Array.isArray(documents)) {
         throw new Error('Documents must be an array');
       }
@@ -113,15 +72,14 @@ class VectorDatabase {
           batch.map(text => this.generateEmbedding(text))
         );
         
-        const upsertData = embeddings.map((embedding, idx) => ({
-          id: `${Date.now()}-${i + idx}`,
-          values: embedding,
-          metadata: { text: batch[idx] },
+        const points = embeddings.map((embedding, idx) => ({
+          id: Date.now() + idx,
+          vector: embedding,
+          payload: { text: batch[idx] }
         }));
 
-        // Updated upsert syntax
-        await this.index.upsert({
-          vectors: upsertData
+        await this.qdrantClient.upsert(this.collectionName, {
+          points: points
         });
       }
 
@@ -134,25 +92,19 @@ class VectorDatabase {
 
   async similaritySearch(query, k = 5) {
     try {
-      if (!this.index) {
-        throw new Error("Pinecone index not initialized");
-      }
-
       const queryEmbedding = await this.generateEmbedding(query);
 
-      // Updated query syntax
-      const queryResponse = await this.index.query({
+      const results = await this.qdrantClient.search(this.collectionName, {
         vector: queryEmbedding,
-        topK: k,
-        includeMetadata: true
+        limit: k
       });
 
-      return queryResponse.matches.map((match) => ({
-        document: match.metadata.text,
-        score: match.score,
+      return results.map(match => ({
+        document: match.payload.text,
+        score: match.score
       }));
     } catch (error) {
-      console.error("Error performing similarity search:", error.message);
+      console.error("Error performing similarity search:", error);
       throw error;
     }
   }
@@ -176,8 +128,8 @@ class VectorDatabase {
   }
 
   async closeConnection() {
-    // Pinecone does not require explicit connection closing.
-    console.log("Pinecone connection is managed automatically.");
+    // Qdrant does not require explicit connection closing.
+    console.log("Qdrant connection is managed automatically.");
   }
 }
 
